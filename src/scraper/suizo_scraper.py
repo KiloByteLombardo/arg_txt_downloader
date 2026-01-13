@@ -279,37 +279,29 @@ class SuizoScraper(BaseScraper):
                     error_message="Factura no encontrada"
                 )
             
-            # Marcar el checkbox de la factura
-            checkbox_selectors = [
-                'input[type="checkbox"]:visible',
-                'table input[type="checkbox"]',
-                'tr input[type="checkbox"]',
-            ]
+            # Marcar el checkbox de la factura (input.comp dentro de la tabla)
+            # Esperar a que la tabla cargue
+            self.page.wait_for_timeout(1000)
             
-            checkbox_found = False
-            for selector in checkbox_selectors:
-                try:
-                    checkbox = self.page.locator(selector).first
-                    if checkbox.is_visible(timeout=2000):
-                        checkbox.check()
-                        checkbox_found = True
-                        print(f"[{self.name}]   - Checkbox marcado")
-                        break
-                except:
-                    continue
-            
-            if not checkbox_found:
+            # Buscar el checkbox - puede estar oculto, usar force click
+            try:
+                checkbox = self.page.locator('input.comp').first
+                checkbox.click(force=True)
+                print(f"[{self.name}]   - Checkbox marcado")
+            except Exception as e:
+                print(f"[{self.name}]   - Error con checkbox: {e}")
+                self.take_screenshot("error_checkbox")
                 return DownloadResult(
                     invoice_number=invoice_number,
                     success=False,
-                    error_message="No se encontró checkbox para seleccionar"
+                    error_message=f"No se encontró checkbox para seleccionar: {e}"
                 )
             
             self.page.wait_for_timeout(500)
             
-            # Click en "Descargar seleccionados"
+            # Click en "Descargar seleccionados" (es un <a>, no un button)
             with self.page.expect_download(timeout=60000) as download_info:
-                self.page.click('button:has-text("Descargar seleccionados")')
+                self.page.click('#submitComprobMarcados2')
                 print(f"[{self.name}]   - Click en Descargar seleccionados")
             
             download = download_info.value
