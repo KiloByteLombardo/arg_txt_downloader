@@ -188,8 +188,8 @@ class SuizoScraper(BaseScraper):
         print(f"[{self.name}] Paso 4: Buscando factura {invoice_number}")
         
         try:
-            # 1. Seleccionar "Mi grupo" en Cuenta
-            self.page.click('text="Mi grupo"')
+            # 1. Seleccionar "Mi grupo" en Cuenta (input#alcGrupo)
+            self.page.click('#alcGrupo')
             self.page.wait_for_timeout(300)
             print(f"[{self.name}]   - Seleccionado: Mi grupo")
             
@@ -198,9 +198,9 @@ class SuizoScraper(BaseScraper):
             self.page.wait_for_timeout(300)
             print(f"[{self.name}]   - Seleccionado: Facturas")
             
-            # 3. Seleccionar "Por Número de comprobante" en Filtro
-            self.page.click('text="Por Número de comprobante"')
-            self.page.wait_for_timeout(300)
+            # 3. Seleccionar "Por Número de comprobante" en Filtro (input#filtrocomps)
+            self.page.click('#filtrocomps')
+            self.page.wait_for_timeout(500)
             print(f"[{self.name}]   - Seleccionado: Por Número de comprobante")
             
             # 4. Escribir el número de factura en el textbox
@@ -229,14 +229,20 @@ class SuizoScraper(BaseScraper):
                 self.take_screenshot("error_input_not_found")
                 return False
             
-            # 5. Click en Consultar
-            self.page.click('button:has-text("Consultar")')
+            # 5. Click en Consultar (el de abajo, no el de "Consultar facturas")
+            self.page.click('input[name="consulta"][value="Consultar"]')
             self.page.wait_for_load_state("networkidle")
             self.page.wait_for_timeout(2000)
             print(f"[{self.name}]   - Click en Consultar")
             
-            # Verificar si hay resultados
-            if self.page.locator('text="Comprobantes encontrados"').is_visible(timeout=5000):
+            # Verificar si hay resultados - buscar texto que contenga "Comprobantes encontrados"
+            # o buscar la fila con el número de factura
+            results_found = (
+                self.page.locator('text=/Comprobantes encontrados/').is_visible(timeout=5000) or
+                self.page.locator(f'td:has-text("{invoice_number}")').is_visible(timeout=5000)
+            )
+            
+            if results_found:
                 print(f"[{self.name}] ✓ Factura encontrada")
                 return True
             else:
