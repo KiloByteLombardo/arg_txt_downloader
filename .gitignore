@@ -42,3 +42,6 @@ temp/
 
 # Screenshots (debugging)
 screenshot_*.png
+
+deploy.ps1
+*.ps1

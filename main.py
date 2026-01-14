@@ -22,7 +22,7 @@ DOWNLOAD_DIR = os.getenv("DOWNLOAD_PATH", "./downloads")
 Path(DOWNLOAD_DIR).mkdir(parents=True, exist_ok=True)
 
 
-@app.route("/", methods=["GET"])
+@app.route("/health", methods=["GET"])
 def health_check():
     """Endpoint de health check para Cloud Run."""
     return jsonify({
@@ -142,26 +142,39 @@ def process_excel():
         return jsonify({"error": "Error de procesamiento", "detail": str(e)}), 500
 
 
-def process_invoices(records: list) -> Dict[str, Any]:
-    """Procesa una lista de registros de factura."""
+def process_invoices(records: list, upload_to_gcs: bool = True) -> Dict[str, Any]:
+    """
+    Procesa una lista de registros de factura.
+    Retorna estructura completa con links para el frontend.
+    """
     if not records:
-        return {"processed": 0, "successful": 0, "failed": 0, "details": []}
+        return {"processed": 0, "successful": 0, "failed": 0, "details": [], "logs": {}}
     
     invoice_numbers = [r.invoice_number for r in records]
     download_results = []
     upload_results = []
+    execution_summary = {}
+    log_info = {}
     
     # Descargar con scraper
     try:
-        with SuizoScraper() as scraper:
+        with SuizoScraper(upload_screenshots_to_gcs=upload_to_gcs) as scraper:
             download_results = scraper.process_invoices(invoice_numbers)
+            
+            # Obtener resumen de ejecución (screenshots, etc)
+            execution_summary = scraper.get_execution_summary()
+            
+            # Guardar log de ejecución
+            log_info = scraper.save_execution_log(upload_to_gcs=upload_to_gcs)
+            
     except Exception as e:
         print(f"[API] Error del scraper: {e}")
         return {
             "error": f"Error del scraper: {str(e)}",
             "processed": 0,
             "successful": 0,
-            "failed": len(records)
+            "failed": len(records),
+            "logs": {}
         }
     
     # Subir archivos exitosos a Google Drive
@@ -198,10 +211,16 @@ def process_invoices(records: list) -> Dict[str, Any]:
     successful = sum(1 for d in details if d["download_success"] and d["upload_success"])
     
     return {
+        "execution_id": execution_summary.get("execution_id"),
         "processed": len(records),
         "successful": successful,
         "failed": len(records) - successful,
-        "details": details
+        "details": details,
+        "logs": {
+            "execution_log_url": log_info.get("gcs_url"),
+            "execution_log_local": log_info.get("local_path"),
+            "screenshots": execution_summary.get("screenshots", [])
+        }
     }
 
 

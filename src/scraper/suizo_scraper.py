@@ -33,10 +33,18 @@ class SuizoScraper(BaseScraper):
         username: Optional[str] = None,
         password: Optional[str] = None,
         headless: bool = True,
-        download_path: str = "./downloads"
+        download_path: str = "./downloads",
+        upload_screenshots_to_gcs: bool = False
     ):
         """
         Inicializa el scraper de Suizo.
+        
+        Args:
+            username: Usuario (si es None, lee de SUIZO_USERNAME)
+            password: Contraseña (si es None, lee de SUIZO_PASSWORD)
+            headless: Ejecutar navegador sin interfaz gráfica
+            download_path: Directorio para guardar archivos
+            upload_screenshots_to_gcs: Subir screenshots de errores a GCS
         """
         username = username or os.getenv("SUIZO_USERNAME")
         password = password or os.getenv("SUIZO_PASSWORD")
@@ -53,7 +61,8 @@ class SuizoScraper(BaseScraper):
             username=username,
             password=password,
             headless=headless,
-            download_path=download_path
+            download_path=download_path,
+            upload_screenshots_to_gcs=upload_screenshots_to_gcs
         )
         
     def login(self) -> bool:
@@ -235,12 +244,15 @@ class SuizoScraper(BaseScraper):
             self.page.wait_for_timeout(2000)
             print(f"[{self.name}]   - Click en Consultar")
             
-            # Verificar si hay resultados - buscar texto que contenga "Comprobantes encontrados"
-            # o buscar la fila con el número de factura
-            results_found = (
-                self.page.locator('text=/Comprobantes encontrados/').is_visible(timeout=5000) or
-                self.page.locator(f'td:has-text("{invoice_number}")').is_visible(timeout=5000)
-            )
+            # Verificar si hay resultados
+            # Buscar "Comprobantes encontrados en su búsqueda" O que exista un checkbox
+            try:
+                results_found = (
+                    self.page.locator('text=/Comprobantes encontrados en su búsqueda/').is_visible(timeout=5000) or
+                    self.page.locator('input.comp').first.is_visible(timeout=2000)
+                )
+            except:
+                results_found = False
             
             if results_found:
                 print(f"[{self.name}] ✓ Factura encontrada")
@@ -273,6 +285,8 @@ class SuizoScraper(BaseScraper):
             
             # Buscar la factura
             if not self.search_invoice(invoice_number):
+                # Reset para el siguiente intento
+                self._reset_for_next_invoice()
                 return DownloadResult(
                     invoice_number=invoice_number,
                     success=False,
@@ -291,6 +305,7 @@ class SuizoScraper(BaseScraper):
             except Exception as e:
                 print(f"[{self.name}]   - Error con checkbox: {e}")
                 self.take_screenshot("error_checkbox")
+                self._reset_for_next_invoice()
                 return DownloadResult(
                     invoice_number=invoice_number,
                     success=False,
@@ -323,12 +338,14 @@ class SuizoScraper(BaseScraper):
             )
             
         except PlaywrightTimeout:
+            self._reset_for_next_invoice()
             return DownloadResult(
                 invoice_number=invoice_number,
                 success=False,
                 error_message="Timeout durante la descarga"
             )
         except Exception as e:
+            self._reset_for_next_invoice()
             return DownloadResult(
                 invoice_number=invoice_number,
                 success=False,
@@ -338,7 +355,19 @@ class SuizoScraper(BaseScraper):
     def _reset_for_next_invoice(self):
         """
         Paso 6: Vuelve a Mis Comprobantes para buscar la siguiente factura.
+        Limpia el estado del formulario.
         """
+        try:
+            # Intentar click en "Consultar nuevamente" si existe
+            if self.page.locator('text="Consultar nuevamente"').is_visible(timeout=1000):
+                self.page.click('text="Consultar nuevamente"')
+                self.page.wait_for_load_state("networkidle")
+                self.page.wait_for_timeout(500)
+                print(f"[{self.name}] Reset con 'Consultar nuevamente'")
+                return
+        except:
+            pass
+        
         try:
             # Click en "Mis Comprobantes" en el submenú
             self.page.click('a:has-text("Mis Comprobantes")')

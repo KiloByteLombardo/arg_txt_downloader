@@ -1,0 +1,78 @@
+version: '3.8'
+
+services:
+  arg-txt-downloader:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: arg-txt-downloader
+    ports:
+      - "8080:8080"
+    environment:
+      # Credenciales de proveedores
+      - SUIZO_USERNAME=${SUIZO_USERNAME}
+      - SUIZO_PASSWORD=${SUIZO_PASSWORD}
+      - DELSUD_USERNAME=${DELSUD_USERNAME:-}
+      - DELSUD_PASSWORD=${DELSUD_PASSWORD:-}
+      - MONROE_USERNAME=${MONROE_USERNAME:-}
+      - MONROE_PASSWORD=${MONROE_PASSWORD:-}
+      
+      # Google Drive
+      - GOOGLE_DRIVE_FOLDER_ID=${GOOGLE_DRIVE_FOLDER_ID}
+      - GOOGLE_CREDENTIALS_PATH=/app/credentials/google_service_account.json
+      
+      # Google Cloud Storage
+      - GCS_BUCKET_NAME=${GCS_BUCKET_NAME:-}
+      
+      # Configuración
+      - DEBUG=${DEBUG:-false}
+      - PORT=8080
+      - PLAYWRIGHT_HEADLESS=true
+      
+    volumes:
+      # Montar credenciales (no incluir en imagen)
+      - ./credentials:/app/credentials:ro
+      # Montar directorio de descargas para persistencia local
+      - ./downloads:/app/downloads
+      
+    # Recursos recomendados para Playwright
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 1G
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+# Para desarrollo local con hot-reload
+  arg-txt-downloader-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: arg-txt-downloader-dev
+    ports:
+      - "8081:8080"
+    environment:
+      - SUIZO_USERNAME=${SUIZO_USERNAME}
+      - SUIZO_PASSWORD=${SUIZO_PASSWORD}
+      - GOOGLE_DRIVE_FOLDER_ID=${GOOGLE_DRIVE_FOLDER_ID}
+      - GOOGLE_CREDENTIALS_PATH=/app/credentials/google_service_account.json
+      - GCS_BUCKET_NAME=${GCS_BUCKET_NAME:-}
+      - DEBUG=true
+      - PORT=8080
+      - PLAYWRIGHT_HEADLESS=true
+    volumes:
+      - ./credentials:/app/credentials:ro
+      - ./downloads:/app/downloads
+      - ./src:/app/src:ro
+      - ./main.py:/app/main.py:ro
+    profiles:
+      - dev
+
