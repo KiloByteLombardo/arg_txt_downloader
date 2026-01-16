@@ -17,41 +17,45 @@ services:
       - MONROE_USERNAME=${MONROE_USERNAME:-}
       - MONROE_PASSWORD=${MONROE_PASSWORD:-}
       
-      # Google Drive
+      # Google (Drive, Storage, Tasks)
       - GOOGLE_DRIVE_FOLDER_ID=${GOOGLE_DRIVE_FOLDER_ID}
       - GOOGLE_CREDENTIALS_PATH=/app/credentials/google_service_account.json
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials/google_service_account.json
       
-      # Google Cloud Storage
+      # Google Cloud Storage & Tasks
+      - GCP_PROJECT_ID=${GCP_PROJECT_ID:-}
       - GCS_BUCKET_NAME=${GCS_BUCKET_NAME:-}
+      - QUEUE_LOCATION=${QUEUE_LOCATION:-us-central1}
+      - QUEUE_NAME=${QUEUE_NAME:-}
+      - WORKER_URL=${WORKER_URL:-}
+      - SERVICE_ACCOUNT_EMAIL=${SERVICE_ACCOUNT_EMAIL:-}
       
       # Configuración
       - DEBUG=${DEBUG:-false}
       - PORT=8080
       - PLAYWRIGHT_HEADLESS=true
+      - BATCH_SIZE=${BATCH_SIZE:-10}
       
     volumes:
-      # Montar credenciales (no incluir en imagen)
+      # Montar credenciales
       - ./credentials:/app/credentials:ro
-      # Montar directorio de descargas para persistencia local
+      # Montar descargas
       - ./downloads:/app/downloads
       
-    # Recursos recomendados para Playwright
     deploy:
       resources:
         limits:
-          memory: 2G
+          memory: 4G
         reservations:
-          memory: 1G
+          memory: 2G
     
-    # Health check
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
 
-# Para desarrollo local con hot-reload
   arg-txt-downloader-dev:
     build:
       context: .
@@ -64,10 +68,17 @@ services:
       - SUIZO_PASSWORD=${SUIZO_PASSWORD}
       - GOOGLE_DRIVE_FOLDER_ID=${GOOGLE_DRIVE_FOLDER_ID}
       - GOOGLE_CREDENTIALS_PATH=/app/credentials/google_service_account.json
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials/google_service_account.json
+      - GCP_PROJECT_ID=${GCP_PROJECT_ID:-}
       - GCS_BUCKET_NAME=${GCS_BUCKET_NAME:-}
+      - QUEUE_LOCATION=${QUEUE_LOCATION:-us-central1}
+      - QUEUE_NAME=${QUEUE_NAME:-}
+      - WORKER_URL=${WORKER_URL:-}
+      - SERVICE_ACCOUNT_EMAIL=${SERVICE_ACCOUNT_EMAIL:-}
       - DEBUG=true
       - PORT=8080
       - PLAYWRIGHT_HEADLESS=true
+      - BATCH_SIZE=${BATCH_SIZE:-10}
     volumes:
       - ./credentials:/app/credentials:ro
       - ./downloads:/app/downloads
@@ -75,4 +86,3 @@ services:
       - ./main.py:/app/main.py:ro
     profiles:
       - dev
-

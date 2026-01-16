@@ -186,70 +186,112 @@ class SuizoScraper(BaseScraper):
             self.take_screenshot("error_navigation")
             return False
     
+    def _wait_for_loading_spinner(self, timeout: int = 30000):
+        """Espera a que el spinner de carga desaparezca."""
+        try:
+            # Buscar el spinner "Aguarde unos instantes..."
+            spinner_selector = 'text=/Aguarde unos instantes|procesada|cargando/i'
+            
+            # Esperar a que desaparezca si está visible
+            if self.page.locator(spinner_selector).is_visible(timeout=2000):
+                print(f"[{self.name}]   - Esperando carga...")
+                self.page.locator(spinner_selector).wait_for(state="hidden", timeout=timeout)
+                print(f"[{self.name}]   - Carga completada")
+                self.page.wait_for_timeout(500)
+        except:
+            # Si no hay spinner, continuar
+            pass
+
     def search_invoice(self, invoice_number: str) -> bool:
         """
         Paso 4: Configura filtros y busca la factura.
-        - Cuenta: Mi grupo
+        - Cuenta: Mi grupo (#alcGrupo, NO #alcGrupo1)
         - Comprobantes: Facturas
-        - Filtro: Por Número de comprobante
+        - Filtro: Por Número de comprobante (#filtrocomps)
         - Escribe el número y consulta
         """
         print(f"[{self.name}] Paso 4: Buscando factura {invoice_number}")
         
         try:
-            # 1. Seleccionar "Mi grupo" en Cuenta (input#alcGrupo)
-            self.page.click('#alcGrupo')
-            self.page.wait_for_timeout(300)
-            print(f"[{self.name}]   - Seleccionado: Mi grupo")
+            # Esperar a que la página cargue completamente
+            self._wait_for_loading_spinner()
+            
+            # 1. Seleccionar "Mi grupo" - usar ID específico #alcGrupo (NO #alcGrupo1)
+            # #alcGrupo es el de la sección "Mis Comprobantes" (abajo)
+            # #alcGrupo1 es el de la sección "Descargar archivos" (arriba) - NO TOCAR
+            self.page.locator('#alcGrupo').click(force=True)
+            self.page.wait_for_timeout(500)
+            print(f"[{self.name}]   - Seleccionado: Mi grupo (#alcGrupo)")
             
             # 2. Seleccionar "Facturas" en Comprobantes
-            self.page.click('label:has-text("Facturas")')
-            self.page.wait_for_timeout(300)
+            # El radio button tiene value="FAC" y name="selcomp"
+            self.page.locator('input[name="selcomp"][value="FAC"]').click(force=True)
+            self.page.wait_for_timeout(500)
             print(f"[{self.name}]   - Seleccionado: Facturas")
             
-            # 3. Seleccionar "Por Número de comprobante" en Filtro (input#filtrocomps)
-            self.page.click('#filtrocomps')
+            # 3. Seleccionar "Por Número de comprobante" - usar ID específico #filtrocomps
+            self.page.locator('#filtrocomps').click(force=True)
             self.page.wait_for_timeout(500)
-            print(f"[{self.name}]   - Seleccionado: Por Número de comprobante")
+            print(f"[{self.name}]   - Seleccionado: Por Número de comprobante (#filtrocomps)")
             
             # 4. Escribir el número de factura en el textbox
-            # El textbox aparece después de seleccionar "Por Número de comprobante"
-            input_selectors = [
-                'input[type="text"]:visible',
-                'input:below(:text("Por Número de comprobante"))',
-                '#comprobante',
-                'input[name="comprobante"]',
-            ]
+            # El textbox está cerca del radio "Por Número de comprobante"
+            # Buscar el input de texto que aparece después de seleccionar esa opción
+            input_field = None
             
-            input_found = False
-            for selector in input_selectors:
-                try:
-                    input_element = self.page.locator(selector).last
-                    if input_element.is_visible(timeout=1000):
-                        input_element.fill(invoice_number)
-                        input_found = True
-                        print(f"[{self.name}]   - Número ingresado: {invoice_number}")
+            # Intentar encontrar el campo de texto correcto
+            try:
+                # Buscar input de texto visible cerca de la sección de filtro
+                inputs = self.page.locator('input[type="text"]:visible')
+                count = inputs.count()
+                
+                for i in range(count):
+                    inp = inputs.nth(i)
+                    # Verificar que no sea el de fechas
+                    placeholder = inp.get_attribute('placeholder') or ''
+                    value = inp.get_attribute('value') or ''
+                    
+                    # Ignorar campos de fecha
+                    if 'fecha' not in placeholder.lower() and '/' not in value and '-' not in value:
+                        input_field = inp
                         break
-                except:
-                    continue
+                
+                if input_field is None:
+                    # Último recurso: tomar el último input de texto
+                    input_field = inputs.last
+                    
+            except:
+                pass
             
-            if not input_found:
+            if input_field is None:
                 print(f"[{self.name}] ✗ No se encontró campo de texto para número")
                 self.take_screenshot("error_input_not_found")
                 return False
             
-            # 5. Click en Consultar (el de abajo, no el de "Consultar facturas")
-            self.page.click('input[name="consulta"][value="Consultar"]')
-            self.page.wait_for_load_state("networkidle")
-            self.page.wait_for_timeout(2000)
+            # Limpiar y escribir el número
+            input_field.clear()
+            input_field.fill(invoice_number)
+            print(f"[{self.name}]   - Número ingresado: {invoice_number}")
+            
+            self.page.wait_for_timeout(300)
+            
+            # 5. Click en Consultar (el botón de la sección Mis Comprobantes, no el de arriba)
+            # El botón correcto tiene value="Consultar" y está después del input de número
+            consultar_btn = self.page.locator('input[type="submit"][value="Consultar"]').last
+            consultar_btn.click()
+            
             print(f"[{self.name}]   - Click en Consultar")
             
+            # Esperar a que cargue la búsqueda
+            self.page.wait_for_load_state("networkidle")
+            self._wait_for_loading_spinner(timeout=60000)
+            self.page.wait_for_timeout(1000)
+            
             # Verificar si hay resultados
-            # Buscar "Comprobantes encontrados en su búsqueda" O que exista un checkbox
             try:
                 results_found = (
-                    self.page.locator('text=/Comprobantes encontrados en su búsqueda/').is_visible(timeout=5000) or
-                    self.page.locator('input.comp').first.is_visible(timeout=2000)
+                    self.page.locator('text=/Comprobantes encontrados/i').is_visible(timeout=5000) or
+                    self.page.locator('input.comp').first.is_visible(timeout=3000)
                 )
             except:
                 results_found = False
@@ -269,10 +311,8 @@ class SuizoScraper(BaseScraper):
     
     def download_invoice(self, invoice_number: str) -> DownloadResult:
         """
-        Paso 5: Marca el checkbox y descarga el archivo.
+        Descarga una factura: navega, busca, marca checkbox, descarga.
         """
-        print(f"[{self.name}] Paso 5: Descargando factura {invoice_number}")
-        
         try:
             # Navegar a Mis Comprobantes si no estamos ahí
             if not self.page.locator('text="Mis Comprobantes"').first.is_visible():
@@ -283,7 +323,7 @@ class SuizoScraper(BaseScraper):
                         error_message="No se pudo navegar a Mis Comprobantes"
                     )
             
-            # Buscar la factura
+            # Paso 4: Buscar la factura
             if not self.search_invoice(invoice_number):
                 # Reset para el siguiente intento
                 self._reset_for_next_invoice()
@@ -293,7 +333,9 @@ class SuizoScraper(BaseScraper):
                     error_message="Factura no encontrada"
                 )
             
-            # Marcar el checkbox de la factura (input.comp dentro de la tabla)
+            # Paso 5: Marcar el checkbox y descargar
+            print(f"[{self.name}] Paso 5: Descargando factura {invoice_number}")
+            
             # Esperar a que la tabla cargue
             self.page.wait_for_timeout(1000)
             

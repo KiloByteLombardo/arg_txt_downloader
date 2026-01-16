@@ -179,7 +179,18 @@ El archivo Excel debe tener las columnas:
 
 ## ☁️ Deploy en Cloud Run
 
-### Build y Deploy
+### 1. Configurar infraestructura (una vez)
+
+Habilitar APIs y crear cola de Cloud Tasks:
+
+```bash
+gcloud services enable cloudtasks.googleapis.com cloudbuild.googleapis.com run.googleapis.com
+
+gcloud tasks queues create invoice-processing-queue \
+    --location=us-central1
+```
+
+### 2. Build y Deploy
 
 ```bash
 # Build
@@ -192,8 +203,31 @@ gcloud run deploy arg-txt-downloader \
   --region us-central1 \
   --memory 2Gi \
   --timeout 3600 \
-  --set-env-vars "SUIZO_USERNAME=xxx,SUIZO_PASSWORD=xxx,GOOGLE_DRIVE_FOLDER_ID=xxx,GCS_BUCKET_NAME=xxx"
+  --set-env-vars "SUIZO_USERNAME=xxx,SUIZO_PASSWORD=xxx,GOOGLE_DRIVE_FOLDER_ID=xxx,GCS_BUCKET_NAME=xxx,PROJECT_ID=[PROJECT_ID],QUEUE_NAME=invoice-processing-queue,WORKER_URL=https://[TU-URL-CLOUD-RUN]"
 ```
+
+**Nota:** En el primer deploy no tendrás la `WORKER_URL`. Despliega primero, obtén la URL, y vuelve a desplegar actualizando la variable `WORKER_URL`.
+
+### 3. Probar Cloud Tasks localmente
+
+Si quieres probar la cola desde tu máquina:
+
+1. Instala `ngrok`: https://ngrok.com/download
+2. Corre tu app: `docker-compose up`
+3. Expon el puerto: `ngrok http 8080`
+4. Copia la URL HTTPS de ngrok (ej: `https://abcd-1234.ngrok-free.app`)
+5. Actualiza tu `.env` local:
+   ```env
+   WORKER_URL=https://abcd-1234.ngrok-free.app
+   GOOGLE_CLOUD_PROJECT=tu-project-id
+   QUEUE_NAME=invoice-processing-queue
+   QUEUE_LOCATION=us-central1
+   ```
+6. Reinicia docker-compose. Ahora las tareas irán a la nube y volverán a tu máquina.
+
+---
+
+### Configurar Secret Manager (Recomendado)
 
 ### Configurar Secret Manager (Recomendado)
 

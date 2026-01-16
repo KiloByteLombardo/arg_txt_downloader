@@ -77,7 +77,9 @@ class BaseScraper(ABC):
         if self._gcs_uploader is None and self.upload_screenshots_to_gcs:
             try:
                 from src.storage.gcs import GCSUploader
-                self._gcs_uploader = GCSUploader(prefix=f"screenshots/{self.name.lower()}/")
+                # Usar fecha de hoy como subcarpeta: screenshots/2026-01-14/suizo/
+                today = datetime.now().strftime("%Y-%m-%d")
+                self._gcs_uploader = GCSUploader(prefix=f"screenshots/{today}/{self.name.lower()}/")
             except Exception as e:
                 print(f"[{self.name}] No se pudo inicializar GCS: {e}")
         return self._gcs_uploader
@@ -346,3 +348,99 @@ class BaseScraper(ABC):
             ],
             "logs_count": len(self.execution_logs)
         }
+    
+    def save_execution_log_json(
+        self, 
+        results: list, 
+        upload_to_gcs: bool = False,
+        execution_id: str = None,
+        batch_id: int = None
+    ) -> dict:
+        """
+        Guarda el log de ejecución en formato JSON para el frontend.
+        
+        Args:
+            results: Lista de DownloadResult
+            upload_to_gcs: Subir a GCS
+            execution_id: ID de ejecución global (para agrupar logs de múltiples workers)
+            batch_id: ID del lote (para diferenciar logs de cada worker)
+        
+        Returns:
+            Dict con {local_path, gcs_url, data}
+        """
+        import json
+        
+        # Usar execution_id pasado o el interno
+        exec_id = execution_id or self.execution_id
+        
+        # Estructura JSON para el frontend
+        log_data = {
+            "execution_id": exec_id,
+            "batch_id": batch_id,
+            "provider": self.name,
+            "timestamp_start": self.execution_logs[0].split("]")[0].replace("[", "") if self.execution_logs else None,
+            "timestamp_end": self.execution_logs[-1].split("]")[0].replace("[", "") if self.execution_logs else None,
+            "summary": {
+                "total": len(results),
+                "successful": sum(1 for r in results if r.success),
+                "failed": sum(1 for r in results if not r.success)
+            },
+            "results": [
+                {
+                    "invoice_number": r.invoice_number,
+                    "success": r.success,
+                    "file_path": r.file_path,
+                    "error_message": r.error_message,
+                    "retries": r.retries,
+                    "timestamp": r.timestamp
+                }
+                for r in results
+            ],
+            "failed_invoices": [r.invoice_number for r in results if not r.success],
+            "screenshots": [
+                {
+                    "name": s["name"],
+                    "url": s["gcs_url"],
+                    "local_path": s["local_path"],
+                    "timestamp": s["timestamp"]
+                }
+                for s in self.screenshots_uploaded
+            ],
+            "logs": self.execution_logs
+        }
+        
+        # Nombre del archivo incluye batch_id si existe
+        if batch_id is not None:
+            filename = f"execution_{exec_id}_batch_{batch_id}.json"
+        else:
+            filename = f"execution_{exec_id}.json"
+        
+        filepath = Path(self.download_path) / filename
+        
+        result = {
+            "filename": filename,
+            "local_path": str(filepath),
+            "gcs_url": None,
+            "data": log_data
+        }
+        
+        # Guardar localmente
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(log_data, f, indent=2, ensure_ascii=False)
+        print(f"[{self.name}] Log JSON guardado: {filepath}")
+        
+        # Subir a GCS si se solicita
+        if upload_to_gcs:
+            try:
+                from src.storage.gcs import GCSUploader
+                # Usar fecha de hoy como subcarpeta: logs/2026-01-14/
+                today = datetime.now().strftime("%Y-%m-%d")
+                uploader = GCSUploader(prefix=f"logs/{today}/")
+                upload_result = uploader.upload_file(str(filepath), content_type="application/json")
+                if upload_result.success:
+                    result["gcs_url"] = upload_result.public_url
+                    print(f"[{self.name}] Log JSON subido a GCS: {upload_result.public_url}")
+            except Exception as e:
+                print(f"[{self.name}] Error subiendo log JSON a GCS: {e}")
+        
+        return result

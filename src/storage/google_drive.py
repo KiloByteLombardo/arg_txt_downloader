@@ -47,10 +47,38 @@ class GoogleDriveUploader:
             "GOOGLE_CREDENTIALS_PATH", 
             "credentials/google_service_account.json"
         )
-        self.folder_id = folder_id or os.getenv("GOOGLE_DRIVE_FOLDER_ID")
+        
+        # Limpiar folder_id de caracteres extraños
+        raw_folder_id = folder_id or os.getenv("GOOGLE_DRIVE_FOLDER_ID", "")
+        self.folder_id = self._clean_folder_id(raw_folder_id)
         
         self.service = None
         self._initialized = False
+    
+    def _clean_folder_id(self, folder_id: str) -> Optional[str]:
+        """Limpia el folder ID de caracteres extraños."""
+        if not folder_id:
+            return None
+        
+        # Quitar espacios, saltos de línea, guiones al inicio/final
+        cleaned = folder_id.strip().strip('-').strip()
+        
+        # Si viene como URL, extraer solo el ID
+        if 'drive.google.com' in cleaned:
+            # Formato: https://drive.google.com/drive/folders/ID
+            if '/folders/' in cleaned:
+                cleaned = cleaned.split('/folders/')[-1].split('?')[0].split('/')[0]
+            # Formato: https://drive.google.com/open?id=ID
+            elif 'id=' in cleaned:
+                cleaned = cleaned.split('id=')[-1].split('&')[0]
+        
+        # Validar que solo contenga caracteres válidos (alfanuméricos, guiones y guiones bajos)
+        import re
+        if not re.match(r'^[a-zA-Z0-9_-]+$', cleaned):
+            print(f"[Drive] ADVERTENCIA: folder_id contiene caracteres inválidos: '{folder_id}' -> '{cleaned}'")
+        
+        print(f"[Drive] Folder ID configurado: {cleaned}")
+        return cleaned if cleaned else None
         
     def initialize(self) -> bool:
         """
@@ -133,11 +161,12 @@ class GoogleDriveUploader:
                 resumable=True
             )
             
-            # Subir archivo
+            # Subir archivo (supportsAllDrives=True para Shared Drives)
             file = self.service.files().create(
                 body=file_metadata,
                 media_body=media,
-                fields='id, webViewLink'
+                fields='id, webViewLink',
+                supportsAllDrives=True
             ).execute()
             
             print(f"[Drive] Archivo subido: {filename} -> {file.get('webViewLink')}")
@@ -217,7 +246,8 @@ class GoogleDriveUploader:
             
             folder = self.service.files().create(
                 body=file_metadata,
-                fields='id'
+                fields='id',
+                supportsAllDrives=True
             ).execute()
             
             folder_id = folder.get('id')
@@ -228,6 +258,57 @@ class GoogleDriveUploader:
         except Exception as e:
             print(f"[Drive] ERROR creando carpeta {folder_name}: {e}")
             return None
+
+
+    def get_or_create_subfolder(
+        self, 
+        folder_name: str, 
+        parent_folder_id: Optional[str] = None
+    ) -> Optional[str]:
+        """
+        Obtiene una subcarpeta existente o la crea si no existe.
+        
+        Args:
+            folder_name: Nombre de la carpeta
+            parent_folder_id: ID de la carpeta padre
+            
+        Returns:
+            ID de la carpeta o None si falla
+        """
+        if not self._initialized:
+            if not self.initialize():
+                return None
+        
+        parent = parent_folder_id or self.folder_id
+        
+        try:
+            # Buscar si ya existe la carpeta
+            query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+            if parent:
+                query += f" and '{parent}' in parents"
+            
+            results = self.service.files().list(
+                q=query,
+                fields='files(id, name)',
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True
+            ).execute()
+            
+            files = results.get('files', [])
+            
+            if files:
+                folder_id = files[0]['id']
+                print(f"[Drive] Carpeta existente encontrada: {folder_name} (ID: {folder_id})")
+                return folder_id
+            
+            # Si no existe, crearla
+            print(f"[Drive] Creando carpeta: {folder_name}")
+            return self.create_subfolder(folder_name, parent_folder_id)
+            
+        except Exception as e:
+            print(f"[Drive] ERROR buscando/creando carpeta {folder_name}: {e}")
+            # Intentar crear de todas formas
+            return self.create_subfolder(folder_name, parent_folder_id)
 
 
 def create_drive_uploader() -> GoogleDriveUploader:

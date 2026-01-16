@@ -3,16 +3,18 @@ ARG TXT Downloader - API Principal
 Automatización de descarga de facturas de proveedores farmacéuticos.
 """
 import os
+import shutil
 import tempfile
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 from flask import Flask, request, jsonify
 
-from src.utils.excel_reader import ExcelReader
+from src.utils.excel_reader import ExcelReader, InvoiceRecord
 from src.scraper.suizo_scraper import SuizoScraper
 from src.storage.google_drive import GoogleDriveUploader
+from src.utils.tasks import TaskManager, create_task_manager
 
 # Inicializar Flask
 app = Flask(__name__)
@@ -21,7 +23,34 @@ app = Flask(__name__)
 DOWNLOAD_DIR = os.getenv("DOWNLOAD_PATH", "./downloads")
 Path(DOWNLOAD_DIR).mkdir(parents=True, exist_ok=True)
 
+# Configuración de Batch
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "10"))
 
+
+def clean_downloads_folder():
+    """
+    Limpia la carpeta de downloads.
+    Solo debe llamarse al inicio del proceso maestro, NO en workers.
+    """
+    try:
+        download_path = Path(DOWNLOAD_DIR)
+        if download_path.exists():
+            # Eliminar todos los archivos .txt y .png (screenshots)
+            for file in download_path.glob("*.txt"):
+                file.unlink()
+                print(f"[Clean] Eliminado: {file.name}")
+            for file in download_path.glob("*.png"):
+                file.unlink()
+                print(f"[Clean] Eliminado: {file.name}")
+            for file in download_path.glob("*.json"):
+                file.unlink()
+                print(f"[Clean] Eliminado: {file.name}")
+            print("[Clean] Carpeta downloads limpiada")
+    except Exception as e:
+        print(f"[Clean] Error limpiando downloads: {e}")
+
+
+@app.route("/", methods=["GET"])
 @app.route("/health", methods=["GET"])
 def health_check():
     """Endpoint de health check para Cloud Run."""
@@ -37,37 +66,26 @@ def health_check():
 def process_excel():
     """
     Endpoint principal para procesar un archivo Excel.
-    
-    Espera un archivo Excel en el body (multipart/form-data).
-    
-    Query params:
-        provider: Filtrar por proveedor (suizo, del_sud, monroe)
-        dry_run: true/false - Solo analizar sin descargar
+    Si Cloud Tasks está configurado (WORKER_URL), divide en lotes y encola tareas.
+    Si no, procesa localmente (secuencial).
     """
     print("[API] Recibida solicitud de procesamiento")
     
-    # Verificar que hay un archivo
+    # Limpiar carpeta de downloads al inicio (solo proceso maestro)
+    clean_downloads_folder()
+    
+    # Verificar archivo
     if 'file' not in request.files:
-        return jsonify({
-            "error": "No se envió ningún archivo",
-            "detail": "El request debe incluir un archivo Excel con key 'file'"
-        }), 400
+        return jsonify({"error": "No file", "detail": "Falta archivo Excel"}), 400
     
     file = request.files['file']
-    
     if file.filename == '':
         return jsonify({"error": "Archivo vacío"}), 400
-    
-    # Verificar extensión
-    if not file.filename.endswith(('.xlsx', '.xls')):
-        return jsonify({
-            "error": "Formato inválido",
-            "detail": "El archivo debe ser Excel (.xlsx o .xls)"
-        }), 400
     
     # Parámetros opcionales
     provider_filter = request.args.get('provider', None)
     dry_run = request.args.get('dry_run', 'false').lower() == 'true'
+    force_local = request.args.get('force_local', 'false').lower() == 'true'
     
     try:
         # Guardar archivo temporalmente
@@ -75,77 +93,168 @@ def process_excel():
             file.save(tmp.name)
             temp_path = tmp.name
         
-        print(f"[API] Archivo guardado: {temp_path}")
-        
-        # Leer y procesar Excel
+        # Leer Excel
         reader = ExcelReader()
         all_records, by_provider = reader.read_excel(temp_path)
+        os.unlink(temp_path) # Limpiar
         
-        # Limpiar archivo temporal
-        os.unlink(temp_path)
-        
-        # Preparar respuesta de análisis
+        # Preparar análisis inicial
         analysis = {
             "total_records": len(all_records),
-            "by_provider": {k: len(v) for k, v in by_provider.items()},
-            "records_preview": [
-                {
-                    "provider": r.provider,
-                    "document": r.full_document,
-                    "invoice_number": r.invoice_number
-                }
-                for r in all_records[:10]
-            ]
+            "by_provider": {k: len(v) for k, v in by_provider.items()}
         }
         
         if dry_run:
-            return jsonify({
-                "status": "dry_run",
-                "message": "Análisis completado (sin descarga)",
-                "analysis": analysis
-            })
+            return jsonify({"status": "dry_run", "analysis": analysis})
         
-        # Filtrar por proveedor si se especificó
-        if provider_filter:
-            if provider_filter not in by_provider:
-                return jsonify({
-                    "error": "Proveedor no encontrado",
-                    "available_providers": list(by_provider.keys())
-                }), 400
-            
-            records_to_process = by_provider[provider_filter]
+        # Filtrar facturas
+        records_to_process = []
+        target_providers = [provider_filter] if provider_filter else list(by_provider.keys())
+        
+        for prov in target_providers:
+            if prov in by_provider:
+                records_to_process.extend(by_provider[prov])
+        
+        if not records_to_process:
+            return jsonify({"status": "no_records", "analysis": analysis})
+
+        # Decidir si usar Cloud Tasks o Local
+        task_manager = create_task_manager()
+        use_cloud_tasks = task_manager.is_enabled() and not force_local
+        print(f"[API] Cloud Tasks habilitado: {use_cloud_tasks} (force_local={force_local})")
+        
+        execution_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        if use_cloud_tasks:
+            # Estrategia Cloud Tasks (Fan-out)
+            return _process_with_cloud_tasks(records_to_process, task_manager, execution_id)
         else:
-            # Por ahora solo procesamos Suizo
-            records_to_process = by_provider.get("suizo", [])
-            if not records_to_process:
-                return jsonify({
-                    "status": "no_records",
-                    "message": "No se encontraron registros de Suizo",
-                    "analysis": analysis
-                })
-        
-        # Procesar facturas
-        results = process_invoices(records_to_process)
-        
-        return jsonify({
-            "status": "completed",
-            "analysis": analysis,
-            "results": results
-        })
-        
-    except ValueError as e:
-        print(f"[API] Error de validación: {e}")
-        return jsonify({"error": "Error de validación", "detail": str(e)}), 400
-        
+            # Estrategia Local (Secuencial)
+            print("[API] Procesando localmente (Cloud Tasks no configurado o force_local=true)")
+            results = process_invoices_local(records_to_process)
+            return jsonify({
+                "status": "completed",
+                "execution_id": execution_id,
+                "analysis": analysis,
+                "results": results
+            })
+            
     except Exception as e:
-        print(f"[API] Error: {e}")
+        print(f"[API] Error global: {e}")
         return jsonify({"error": "Error de procesamiento", "detail": str(e)}), 500
 
 
-def process_invoices(records: list, upload_to_gcs: bool = True) -> Dict[str, Any]:
+def _process_with_cloud_tasks(records: List[InvoiceRecord], task_manager: TaskManager, execution_id: str):
+    """Divide las facturas en lotes y crea tareas en Cloud Tasks."""
+    # Agrupar por proveedor para mantener contexto
+    by_provider = {}
+    for r in records:
+        if r.provider not in by_provider:
+            by_provider[r.provider] = []
+        by_provider[r.provider].append(r.invoice_number)
+    
+    total_tasks = 0
+    batches_info = []
+    
+    for provider, invoices in by_provider.items():
+        # Dividir en chunks de BATCH_SIZE
+        chunks = [invoices[i:i + BATCH_SIZE] for i in range(0, len(invoices), BATCH_SIZE)]
+        total_batches = len(chunks)
+        
+        for i, chunk in enumerate(chunks):
+            success = task_manager.create_invoice_batch_task(
+                invoice_numbers=chunk,
+                batch_id=i,
+                total_batches=total_batches,
+                provider=provider,
+                execution_id=execution_id
+            )
+            if success:
+                total_tasks += 1
+                batches_info.append({
+                    "provider": provider,
+                    "batch": i+1,
+                    "size": len(chunk),
+                    "status": "queued"
+                })
+            else:
+                batches_info.append({
+                    "provider": provider,
+                    "batch": i+1,
+                    "status": "failed_to_queue"
+                })
+    
+    return jsonify({
+        "status": "queued",
+        "execution_id": execution_id,
+        "message": f"Se encolaron {total_tasks} tareas para procesamiento paralelo",
+        "batches": batches_info
+    })
+
+
+@app.route("/api/worker", methods=["POST"])
+def worker_process():
     """
-    Procesa una lista de registros de factura.
-    Retorna estructura completa con links para el frontend.
+    Endpoint WORKER llamado por Cloud Tasks.
+    Recibe un lote de facturas y las procesa.
+    """
+    try:
+        payload = request.get_json()
+        if not payload:
+            return jsonify({"error": "Invalid payload"}), 400
+            
+        invoice_numbers = payload.get("invoice_numbers", [])
+        provider = payload.get("provider", "suizo") # Default por ahora
+        batch_id = payload.get("batch_id")
+        execution_id = payload.get("execution_id")
+        
+        print(f"[Worker] Procesando lote {batch_id} de {provider} ({len(invoice_numbers)} facturas)")
+        
+        # Aquí reutilizamos la lógica de procesamiento pero adaptada para lista de strings
+        # Reconstruimos objetos InvoiceRecord mínimos si es necesario, o adaptamos process_invoices_local
+        
+        # Como process_invoices_local espera InvoiceRecord, creamos dummies
+        records = [
+            InvoiceRecord(
+                provider=provider,
+                full_document=inv, # No tenemos el doc completo aquí, usamos num
+                invoice_number=inv,
+                observation="From Worker",
+                row_index=0
+            ) for inv in invoice_numbers
+        ]
+        
+        # Procesar (pasar execution_id y batch_id para el log)
+        results = process_invoices_local(records, execution_id=execution_id, batch_id=batch_id)
+        
+        return jsonify({
+            "status": "success",
+            "batch_id": batch_id,
+            "execution_id": execution_id,
+            "processed": len(records),
+            "results": results
+        })
+        
+    except Exception as e:
+        print(f"[Worker] Error fatal: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+def process_invoices_local(
+    records: list, 
+    upload_to_gcs: bool = True,
+    execution_id: str = None,
+    batch_id: int = None
+) -> Dict[str, Any]:
+    """
+    Lógica core de procesamiento (Scraper + Drive + GCS).
+    Usada tanto por el endpoint local como por el worker.
+    
+    Args:
+        records: Lista de InvoiceRecord
+        upload_to_gcs: Subir logs/screenshots a GCS
+        execution_id: ID de ejecución (para agrupar logs de múltiples workers)
+        batch_id: ID del lote (para diferenciar logs de cada worker)
     """
     if not records:
         return {"processed": 0, "successful": 0, "failed": 0, "details": [], "logs": {}}
@@ -156,19 +265,26 @@ def process_invoices(records: list, upload_to_gcs: bool = True) -> Dict[str, Any
     execution_summary = {}
     log_info = {}
     
+    # Determinar proveedor (por ahora asumimos Suizo, pero preparado para switch)
+    provider_name = records[0].provider.lower() if records else "suizo"
+    
     # Descargar con scraper
     try:
+        # Aquí podríamos instanciar el scraper correcto según provider_name
         with SuizoScraper(upload_screenshots_to_gcs=upload_to_gcs) as scraper:
             download_results = scraper.process_invoices(invoice_numbers)
-            
-            # Obtener resumen de ejecución (screenshots, etc)
             execution_summary = scraper.get_execution_summary()
-            
-            # Guardar log de ejecución
-            log_info = scraper.save_execution_log(upload_to_gcs=upload_to_gcs)
+            # Guardar log en formato JSON para el frontend
+            # Pasar execution_id y batch_id para nombrar el archivo correctamente
+            log_info = scraper.save_execution_log_json(
+                download_results, 
+                upload_to_gcs=upload_to_gcs,
+                execution_id=execution_id,
+                batch_id=batch_id
+            )
             
     except Exception as e:
-        print(f"[API] Error del scraper: {e}")
+        print(f"[Process] Error del scraper: {e}")
         return {
             "error": f"Error del scraper: {str(e)}",
             "processed": 0,
@@ -183,10 +299,21 @@ def process_invoices(records: list, upload_to_gcs: bool = True) -> Dict[str, Any
     if successful_downloads:
         try:
             uploader = GoogleDriveUploader()
+            
+            # Crear subcarpeta con la fecha de hoy
+            today_folder_name = datetime.now().strftime("%Y-%m-%d")
+            today_folder_id = uploader.get_or_create_subfolder(today_folder_name)
+            
+            if today_folder_id:
+                print(f"[Drive] Usando carpeta: {today_folder_name}")
+            else:
+                print(f"[Drive] No se pudo crear carpeta {today_folder_name}, usando carpeta raíz")
+            
+            # Subir archivos a la carpeta de hoy
             file_paths = [r.file_path for r in successful_downloads if r.file_path]
-            upload_results = uploader.upload_files(file_paths)
+            upload_results = uploader.upload_files(file_paths, folder_id=today_folder_id)
         except Exception as e:
-            print(f"[API] Error de upload: {e}")
+            print(f"[Process] Error de upload a Drive: {e}")
     
     # Compilar resultados
     details = []
@@ -231,7 +358,6 @@ def test_excel():
         return jsonify({"error": "No file uploaded"}), 400
     
     file = request.files['file']
-    
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp:
             file.save(tmp.name)
@@ -239,7 +365,6 @@ def test_excel():
         
         reader = ExcelReader()
         all_records, by_provider = reader.read_excel(temp_path)
-        
         os.unlink(temp_path)
         
         return jsonify({
@@ -250,13 +375,10 @@ def test_excel():
                 {
                     "provider": r.provider,
                     "document": r.full_document,
-                    "invoice_number": r.invoice_number,
-                    "observation": r.observation
-                }
-                for r in all_records[:5]
+                    "invoice_number": r.invoice_number
+                } for r in all_records[:5]
             ]
         })
-        
     except Exception as e:
         return jsonify({"status": "invalid", "error": str(e)}), 400
 
@@ -264,6 +386,5 @@ def test_excel():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8080))
     debug = os.getenv("DEBUG", "false").lower() == "true"
-    
     print(f"[API] Iniciando servidor en puerto {port}")
     app.run(host="0.0.0.0", port=port, debug=debug)
