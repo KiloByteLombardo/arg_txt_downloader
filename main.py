@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Dict, Any, List
 
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 
 from src.utils.excel_reader import ExcelReader, InvoiceRecord
 from src.scraper.suizo_scraper import SuizoScraper
@@ -18,6 +19,9 @@ from src.utils.tasks import TaskManager, create_task_manager
 
 # Inicializar Flask
 app = Flask(__name__)
+
+# Habilitar CORS para todas las rutas y orígenes
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 # Directorio temporal para descargas
 DOWNLOAD_DIR = os.getenv("DOWNLOAD_PATH", "./downloads")
@@ -381,6 +385,88 @@ def test_excel():
         })
     except Exception as e:
         return jsonify({"status": "invalid", "error": str(e)}), 400
+
+
+@app.route("/api/logs/folders", methods=["GET"])
+def list_log_folders():
+    """
+    Lista las carpetas de logs (fechas) disponibles en el bucket.
+    
+    Returns:
+        {
+            "folders": [
+                {"date": "2026-01-16", "displayName": "16 Enero 2026"},
+                {"date": "2026-01-15", "displayName": "15 Enero 2026"},
+                ...
+            ]
+        }
+    """
+    try:
+        from src.storage.gcs import GCSUploader
+        
+        uploader = GCSUploader()
+        folders = uploader.list_log_folders()
+        
+        return jsonify({
+            "folders": folders,
+            "count": len(folders)
+        })
+        
+    except Exception as e:
+        print(f"[API] Error listando carpetas de logs: {e}")
+        return jsonify({"error": str(e), "folders": []}), 500
+
+
+@app.route("/api/logs/<date>", methods=["GET"])
+def get_logs_by_date(date: str):
+    """
+    Obtiene todos los logs de una fecha específica.
+    
+    Args:
+        date: Fecha en formato YYYY-MM-DD (ej: 2026-01-16)
+        
+    Returns:
+        Array de JSONs con el contenido de cada log
+    """
+    # Validar formato de fecha
+    import re
+    if not re.match(r'^\d{4}-\d{2}-\d{2}$', date):
+        return jsonify({
+            "error": "Formato de fecha inválido. Usar YYYY-MM-DD",
+            "example": "2026-01-16"
+        }), 400
+    
+    try:
+        from src.storage.gcs import GCSUploader
+        
+        uploader = GCSUploader()
+        logs = uploader.get_logs_by_date(date)
+        
+        # Calcular resumen consolidado
+        total_processed = sum(log.get("summary", {}).get("total", 0) for log in logs)
+        total_successful = sum(log.get("summary", {}).get("successful", 0) for log in logs)
+        total_failed = sum(log.get("summary", {}).get("failed", 0) for log in logs)
+        
+        # Consolidar facturas fallidas
+        all_failed_invoices = []
+        for log in logs:
+            all_failed_invoices.extend(log.get("failed_invoices", []))
+        
+        return jsonify({
+            "date": date,
+            "batches_count": len(logs),
+            "consolidated_summary": {
+                "total": total_processed,
+                "successful": total_successful,
+                "failed": total_failed
+            },
+            "failed_invoices": all_failed_invoices,
+            "logs": logs
+        })
+        
+    except Exception as e:
+        print(f"[API] Error obteniendo logs de {date}: {e}")
+        return jsonify({"error": str(e), "logs": []}), 500
 
 
 if __name__ == "__main__":

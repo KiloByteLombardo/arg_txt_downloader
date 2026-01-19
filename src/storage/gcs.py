@@ -220,6 +220,115 @@ class GCSUploader:
         except Exception as e:
             print(f"[GCS] ERROR listando archivos: {e}")
             return []
+    
+    def list_log_folders(self) -> list:
+        """
+        Lista las carpetas de logs (fechas) en el bucket.
+        
+        Returns:
+            Lista de diccionarios con {date, displayName}
+        """
+        if not self._initialized:
+            if not self.initialize():
+                return []
+        
+        try:
+            # Listar objetos con prefijo "logs/"
+            blobs = self.client.list_blobs(self.bucket_name, prefix="logs/", delimiter="/")
+            
+            # Obtener los prefijos (carpetas)
+            folders = set()
+            
+            # Iterar para forzar la carga de prefixes
+            for blob in blobs:
+                pass
+            
+            # Los prefijos son las "carpetas"
+            for prefix in blobs.prefixes:
+                # prefix viene como "logs/2026-01-14/"
+                date_str = prefix.replace("logs/", "").rstrip("/")
+                if date_str and len(date_str) == 10:  # Formato YYYY-MM-DD
+                    folders.add(date_str)
+            
+            # Convertir a lista ordenada (más reciente primero)
+            sorted_folders = sorted(folders, reverse=True)
+            
+            # Formatear con displayName
+            result = []
+            months_es = {
+                "01": "Enero", "02": "Febrero", "03": "Marzo", "04": "Abril",
+                "05": "Mayo", "06": "Junio", "07": "Julio", "08": "Agosto",
+                "09": "Septiembre", "10": "Octubre", "11": "Noviembre", "12": "Diciembre"
+            }
+            
+            for date_str in sorted_folders:
+                try:
+                    year, month, day = date_str.split("-")
+                    display_name = f"{int(day)} {months_es.get(month, month)} {year}"
+                    result.append({
+                        "date": date_str,
+                        "displayName": display_name
+                    })
+                except:
+                    result.append({
+                        "date": date_str,
+                        "displayName": date_str
+                    })
+            
+            return result
+            
+        except Exception as e:
+            print(f"[GCS] ERROR listando carpetas: {e}")
+            return []
+    
+    def get_logs_by_date(self, date: str) -> list:
+        """
+        Obtiene todos los JSONs de logs de una fecha específica.
+        
+        Args:
+            date: Fecha en formato YYYY-MM-DD
+            
+        Returns:
+            Lista de diccionarios con el contenido de cada JSON
+        """
+        import json
+        
+        if not self._initialized:
+            if not self.initialize():
+                return []
+        
+        try:
+            prefix = f"logs/{date}/"
+            blobs = self.client.list_blobs(self.bucket_name, prefix=prefix)
+            
+            logs = []
+            for blob in blobs:
+                if blob.name.endswith(".json"):
+                    try:
+                        # Descargar y parsear el JSON
+                        content = blob.download_as_text()
+                        log_data = json.loads(content)
+                        
+                        # Agregar metadata del blob
+                        log_data["_gcs_metadata"] = {
+                            "blob_name": blob.name,
+                            "url": f"https://storage.googleapis.com/{self.bucket_name}/{blob.name}",
+                            "updated": blob.updated.isoformat() if blob.updated else None,
+                            "size": blob.size
+                        }
+                        
+                        logs.append(log_data)
+                    except Exception as e:
+                        print(f"[GCS] Error leyendo {blob.name}: {e}")
+            
+            # Ordenar por batch_id si existe
+            logs.sort(key=lambda x: x.get("batch_id", 0) or 0)
+            
+            return logs
+            
+        except Exception as e:
+            print(f"[GCS] ERROR obteniendo logs de {date}: {e}")
+            return []
 
 
 class ExecutionLogger:
