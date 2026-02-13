@@ -14,6 +14,7 @@ from flask_cors import CORS
 
 from src.utils.excel_reader import ExcelReader, InvoiceRecord
 from src.scraper.suizo_scraper import SuizoScraper
+from src.scraper.monroe_scraper import MonroeScraper
 from src.storage.google_drive import GoogleDriveUploader
 from src.utils.tasks import TaskManager, create_task_manager
 
@@ -269,17 +270,32 @@ def process_invoices_local(
     execution_summary = {}
     log_info = {}
     
-    # Determinar proveedor (por ahora asumimos Suizo, pero preparado para switch)
+    # Determinar proveedor
     provider_name = records[0].provider.lower() if records else "suizo"
+    print(f"[Process] Proveedor detectado: {provider_name}")
+    
+    # Seleccionar scraper según proveedor
+    def get_scraper(provider: str):
+        """Factory para obtener el scraper correcto."""
+        provider_lower = provider.lower()
+        
+        if "monroe" in provider_lower or "masa" in provider_lower:
+            print(f"[Process] Usando MonroeScraper")
+            return MonroeScraper(upload_screenshots_to_gcs=upload_to_gcs)
+        elif "suizo" in provider_lower:
+            print(f"[Process] Usando SuizoScraper")
+            return SuizoScraper(upload_screenshots_to_gcs=upload_to_gcs)
+        else:
+            # Default a Suizo por ahora
+            print(f"[Process] Proveedor '{provider}' no reconocido, usando SuizoScraper")
+            return SuizoScraper(upload_screenshots_to_gcs=upload_to_gcs)
     
     # Descargar con scraper
     try:
-        # Aquí podríamos instanciar el scraper correcto según provider_name
-        with SuizoScraper(upload_screenshots_to_gcs=upload_to_gcs) as scraper:
+        with get_scraper(provider_name) as scraper:
             download_results = scraper.process_invoices(invoice_numbers)
             execution_summary = scraper.get_execution_summary()
             # Guardar log en formato JSON para el frontend
-            # Pasar execution_id y batch_id para nombrar el archivo correctamente
             log_info = scraper.save_execution_log_json(
                 download_results, 
                 upload_to_gcs=upload_to_gcs,

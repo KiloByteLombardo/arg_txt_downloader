@@ -83,6 +83,17 @@ class BaseScraper(ABC):
             except Exception as e:
                 print(f"[{self.name}] No se pudo inicializar GCS: {e}")
         return self._gcs_uploader
+    
+    def _apply_stealth(self, page) -> None:
+        """Aplica stealth al page si el paquete está disponible."""
+        try:
+            from playwright_stealth import Stealth  # type: ignore[import-not-found]
+            stealth = Stealth()
+            stealth.apply_stealth_sync(page)
+            self._log("Stealth aplicado")
+        except Exception as e:
+            print(f"[{self.name}] Stealth no disponible: {e}")
+            self._log(f"Stealth no disponible: {e}", "WARNING")
         
     def __enter__(self):
         """Context manager entry."""
@@ -118,6 +129,7 @@ class BaseScraper(ABC):
         
         self.page = self.context.new_page()
         self.page.set_default_timeout(self.timeout)
+        self._apply_stealth(self.page)
         
         print(f"[{self.name}] Navegador iniciado")
         self._log("Navegador iniciado")
@@ -184,10 +196,10 @@ class BaseScraper(ABC):
             results.append(result)
             
             if result.success:
-                print(f"  ✓ Descargado: {result.file_path}")
+                print(f"  [OK] Descargado: {result.file_path}")
                 self._log(f"OK: {invoice_number} -> {result.file_path}")
             else:
-                print(f"  ✗ Error después de {max_retries} intentos: {result.error_message}")
+                print(f"  [FAIL] Error despues de {max_retries} intentos: {result.error_message}")
                 self._log(f"FALLIDA: {invoice_number} - {result.error_message}", "ERROR")
                 failed_invoices.append(invoice_number)
         

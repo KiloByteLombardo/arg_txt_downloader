@@ -1,6 +1,6 @@
 # ============================================
 # ARG TXT Downloader - Dockerfile para Cloud Run
-# Optimizado para Playwright con Chromium
+# Optimizado para Playwright con Chromium + xvfb
 # ============================================
 
 FROM mcr.microsoft.com/playwright/python:v1.40.0-jammy
@@ -8,11 +8,17 @@ FROM mcr.microsoft.com/playwright/python:v1.40.0-jammy
 # Establecer directorio de trabajo
 WORKDIR /app
 
+# Instalar xvfb para display virtual (necesario para Monroe)
+RUN apt-get update && apt-get install -y \
+    xvfb \
+    && rm -rf /var/lib/apt/lists/*
+
 # Variables de entorno
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PORT=8080 \
-    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    DISPLAY=:99
 
 # Copiar requirements primero (para cache de Docker)
 COPY requirements.txt .
@@ -28,12 +34,17 @@ COPY . .
 RUN mkdir -p /app/downloads && \
     chmod 777 /app/downloads
 
-# Crear directorio para credenciales
-RUN mkdir -p /app/credentials
+# Crear directorio para credenciales y sesiones
+RUN mkdir -p /app/credentials /app/sessions && \
+    chmod 777 /app/sessions
 
 # Exponer puerto
 EXPOSE 8080
 
-# Comando de inicio con Gunicorn
-CMD exec gunicorn --bind :$PORT --workers 1 --threads 8 --timeout 0 main:app
+# Script de inicio que lanza xvfb + gunicorn
+COPY start.sh /start.sh
+RUN chmod +x /start.sh
+
+# Comando de inicio
+CMD ["/start.sh"]
 
